@@ -1,4 +1,5 @@
 from fastapi import FastAPI, File, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import numpy as np
 import cv2
@@ -10,36 +11,29 @@ from keras.applications import efficientnet_v2
 from keras.applications.efficientnet_v2 import preprocess_input
 from mtcnn import MTCNN
 
-app = FastAPI(
-    title="DeepFake Detection API",
-    description="Keras EfficientNetV2-based DeepFake video detector",
-    version="1.0"
+app = FastAPI(title="DeepFake Detection API", description="Keras EfficientNetV2-based DeepFake video detector")
+
+# Enable CORS for local development so the frontend (Vite) can call this API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # change to specific origins in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
+# Load EfficientNetV2 model (ImageNet pretrained)
 IMG_SIZE = 380
-model = None
-detector = None
+base_model = efficientnet_v2.EfficientNetV2S(
+    weights="imagenet", include_top=False, input_shape=(IMG_SIZE, IMG_SIZE, 3), pooling="avg"
+)
 
+# Add simple classification head (for binary classification)
+x = tf.keras.layers.Dense(1, activation="sigmoid")(base_model.output)
+model = tf.keras.Model(inputs=base_model.input, outputs=x)
+model.trainable = False  # for inference only
 
-@app.on_event("startup")
-def load_model():
-    """Lazy-load model and MTCNN detector once at startup"""
-    global model, detector
-    print("⏳ Loading EfficientNetV2S and MTCNN...")
-
-    base_model = efficientnet_v2.EfficientNetV2S(
-        weights="imagenet",
-        include_top=False,
-        input_shape=(IMG_SIZE, IMG_SIZE, 3),
-        pooling="avg",
-    )
-    x = tf.keras.layers.Dense(1, activation="sigmoid")(base_model.output)
-    model = tf.keras.Model(inputs=base_model.input, outputs=x)
-    model.trainable = False
-    detector = MTCNN()
-
-    print("✅ Model and MTCNN loaded successfully.")
-
+detector = MTCNN()
 
 def confident_strategy(preds, t=0.8):
     preds = np.array(preds)
@@ -52,9 +46,7 @@ def confident_strategy(preds, t=0.8):
     else:
         return np.mean(preds)
 
-
 def process_video(video_path: str) -> float:
-    """Extract frames, detect faces, and predict fake probability"""
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     frame_indices = np.linspace(0, total_frames - 1, 32).astype(int)
@@ -69,14 +61,9 @@ def process_video(video_path: str) -> float:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         faces = detector.detect_faces(rgb)
 
-        if faces:
+        if len(faces) > 0:
             x, y, w, h = faces[0]["box"]
-            # Clamp coordinates within image boundaries
-            x, y = max(0, x), max(0, y)
-            face = rgb[y:y + h, x:x + w]
-            if face.size == 0:
-                continue
-
+            face = rgb[y:y+h, x:x+w]
             face = cv2.resize(face, (IMG_SIZE, IMG_SIZE))
             img_array = preprocess_input(np.expand_dims(face.astype(np.float32), 0))
             pred = float(model.predict(img_array, verbose=0)[0][0])
@@ -88,14 +75,18 @@ def process_video(video_path: str) -> float:
     return confident_strategy(preds)
 
 
-@app.get("/")
-def root():
-    return {"status": "ok", "message": "DeepFake Detection API is running"}
+@app.get('/health')
+async def health():
+    return {"status": "ok"}
 
+
+@app.get('/predict/test')
+async def predict_test():
+    # Deterministic test response for frontend connectivity checks
+    return JSONResponse({"prediction": "real", "confidence": 0.12})
 
 @app.post("/predict/")
 async def predict(video: UploadFile = File(...)):
-    """Accepts an MP4 file and returns DeepFake classification"""
     temp_name = f"temp_{uuid.uuid4()}.mp4"
     with open(temp_name, "wb") as buffer:
         shutil.copyfileobj(video.file, buffer)
