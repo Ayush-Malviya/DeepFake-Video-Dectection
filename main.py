@@ -99,3 +99,7 @@ async def predict(video: UploadFile = File(...)):
         })
     finally:
         os.remove(temp_name)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000)
